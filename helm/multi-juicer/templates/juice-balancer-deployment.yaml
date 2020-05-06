@@ -1,27 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: 'juice-balancer'
+  name: juice-balancer
   labels:
-    app: 'juice-balancer'
-    helm.sh/chart: {{ include "juicy-ctf.chart" . }}
+    {{- include "multi-juicer.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: 'juice-balancer'
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "multi-juicer.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/juice-balancer-config-map.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/juice-balancer-secret.yaml") . | sha256sum }}
       labels:
-        app.kubernetes.io/name: 'juice-balancer'
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "multi-juicer.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: juice-balancer
       containers:
-        - name: juice-balancer
+        - name: {{ .Chart.Name }}
           image: '{{ .Values.balancer.repository }}:{{ .Values.balancer.tag }}'
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           ports:
@@ -36,11 +33,6 @@ spec:
               path: /balancer/
               port: http
           env:
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-redis
-                  key: redis-password
             - name: COOKIEPARSER_SECRET
               valueFrom:
                 secretKeyRef:
@@ -51,6 +43,18 @@ spec:
                 secretKeyRef:
                   name: juice-balancer-secret
                   key: adminPassword
+            {{- if .Values.balancer.metrics.enabled }}
+            - name: METRICS_BASICAUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: juice-balancer-secret
+                  key: metricsBasicAuthUsername
+            - name: METRICS_BASICAUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: juice-balancer-secret
+                  key: metricsBasicAuthPassword
+            {{- end }}
           volumeMounts:
             - name: config-volume
               mountPath: /home/app/config/

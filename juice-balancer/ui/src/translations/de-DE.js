@@ -17,11 +17,14 @@ export default {
   log_out: 'Ausloggen',
   team_created: 'Team Erstellt',
   passcode_explanation:
-    'Um sicherzustellen das nicht jeder einfach deinem Team beitrten kann, haben wir ein Passwort erstellt das du mit deinem Teammitgliedern teilen kannst. Deine Teammitglieder brauchen das gleiche Passwort um dem Team beizutreten. Du kannst das Passwort von unten kopieren.',
+    'Um sicherzustellen das nicht jeder einfach deinem Team beitreten kann, haben wir ein Passwort erstellt das du mit deinem Teammitgliedern teilen kannst. Deine Teammitglieder brauchen das gleiche Passwort um dem Team beizutreten. Du kannst das Passwort von unten kopieren.',
   passcode: 'Passwort',
   instance_status_ready: 'Juice Shop Instanz Bereit',
   instance_status_start_hacking: 'Anfangen zu Hacken',
   instance_status_starting: 'Juice Shop Instanz startet',
+  instance_status_starting_taking_longer_than_usual:
+    'Das Starten der Instanz dauert länger als normal...',
+  instance_status_timed_out: 'Das Starten der Instanz hat zu lange gedauert',
   'admin_table.table_header': 'Aktive Teams',
   'admin_table.teamname': 'Teamname',
   'admin_table.ready': 'Bereit',

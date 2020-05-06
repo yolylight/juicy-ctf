@@ -1,9 +1,11 @@
-![JuicyCTF, Multi User Juice Shop Platform](./cover.svg)
+![MultiJuicer, Multi User Juice Shop Platform](./cover.svg)
 
 Running CTFs and Security Trainings with [OWASP Juice Shop](https://github.com/bkimminich/juice-shop) is usually quite tricky, Juice Shop just isn't intended to be used by multiple users at a time.
 Instructing everybody how to start Juice Shop on their own machine works ok, but takes away too much valuable time.
 
-JuicyCTF gives you the ability to run separate Juice Shop instances for every participant on a central kubernetes cluster, to run events without the need for local Juice Shop instances.
+MultiJuicer gives you the ability to run separate Juice Shop instances for every participant on a central kubernetes cluster, to run events without the need for local Juice Shop instances.
+
+> **Note:** This project was called JuicyCTF until recently. This was changed to avoid confusions with the [juice-shop-ctf](https://github.com/bkimminich/juice-shop-ctf) project.
 
 **What it does:**
 
@@ -12,51 +14,46 @@ JuicyCTF gives you the ability to run separate Juice Shop instances for every pa
 - backup and auto apply challenge progress in case of Juice Shop container restarts
 - cleanup old & unused instances automatically
 
-![JuicyCTF, High Level Architecture Diagram](./high-level-architecture.svg)
+![MultiJuicer, High Level Architecture Diagram](./high-level-architecture.svg)
 
 ## Installation
 
-JuicyCTF runs on kubernetes, to install it you'll need [helm](https://helm.sh).
-
-If you aren't familiar with helm, try out the helm 3 beta.
-It's easier to install and easier to use. It's pretty stable, and it doesn't have a server side component anymore. It just runs on your local machine.
+MultiJuicer runs on kubernetes, to install it you'll need [helm](https://helm.sh).
 
 ```sh
-helm repo add juicy-ctf https://iteratec.github.io/juicy-ctf/
+helm repo add multi-juicer https://iteratec.github.io/multi-juicer/
 
 # for helm <= 2
-helm install juicy-ctf/juicy-ctf --name juicy-ctf
+helm install multi-juicer/multi-juicer --name multi-juicer
 
 # for helm >= 3
-helm install juicy-ctf juicy-ctf/juicy-ctf
+helm install multi-juicer multi-juicer/multi-juicer
 ```
 
 ### Installation Guides for specific Cloud Providers
 
-Generally JuicyCTF runs on pretty much any kubernetes cluster, but to make it easier for anybody who is new to kubernetes we got some guides on how to setup a kubernetes cluster with JuicyCTF installed for some specific Cloud providers.
+Generally MultiJuicer runs on pretty much any kubernetes cluster, but to make it easier for anybody who is new to kubernetes we got some guides on how to setup a kubernetes cluster with MultiJuicer installed for some specific Cloud providers.
 
 - [Digital Ocean](./guides/digital-ocean/digital-ocean.md)
 - [OpenShift](./guides/openshift/openshift.md)
-- [\[WIP\] AWS](./guides/aws/aws.md)
-- [\[WIP\] Azure](./guides/azure/azure.md)
+- [AWS](./guides/aws/aws.md)
+- [\[WIP\]Azure](./guides/azure/azure.md)
 
 ### Customizing the Setup
 
 You got some options on how to setup the stack, with some option to customize the JuiceShop instances to your own liking.
-You can find the default config values under: [helm/juicy-ctf/values.yaml](./helm/juicy-ctf/values.yaml)
+You can find the default config values under: [helm/multi-juicer/values.yaml](./helm/multi-juicer/values.yaml)
 
 Download & Save the file and tell helm to use your config file over the default by running:
 
 ```sh
-helm install -f values.yaml juicy-ctf ./juicy-ctf/helm/juicy-ctf/
+helm install -f values.yaml multi-juicer ./multi-juicer/helm/multi-juicer/
 ```
 
 ### Deinstallation
 
 ```sh
-helm delete juicy-ctf
-# Also delete all Juice Shop Deployments which still exist
-kubectl delete deployment --selector app=juice-shop && kubectl delete service --selector app=juice-shop
+helm delete multi-juicer
 ```
 
 ## FAQ
@@ -65,18 +62,16 @@ kubectl delete deployment --selector app=juice-shop && kubectl delete service --
 
 To be on the safe side calculate with:
 
-- _1GB memory & 1CPU overhead_, for the balancer, redis & co
+- _1GB memory & 1CPU overhead_, for the balancer & co
 - _200MB & 0.2CPU \* number of participants_, for the individual JuiceShop Instances
 
 The numbers above reflect the default resource limits. These can be tweaked, see: [Customizing the Setup](#customizing-the-setup)
 
-### How many users can JuicyCTF handle?
+### How many users can MultiJuicer handle?
 
 There is no real fixed limit. (Even thought you can configure one 😉)
 The custom LoadBalancer, through which all traffic for the individual Instances flows, can be replicated as much as you'd like.
 You can also attach a [Horizontal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/) to automatically scale the LoadBalancer.
-
-When scaling up, also keep an eye on the redis instance. Make sure it is still able to handle the load.
 
 ### Why a custom LoadBalancer?
 
@@ -95,6 +90,15 @@ There are some pretty good reasons for this:
 - The ability delete the instances of a team separately. Scaling down safely, without removing instances of active teams, is really tricky with a scaled deployment. You can only choose the desired scale not which pods to keep and which to throw away.
 - To ensure that pods are still properly associated with teams after a pod gets recreated. This is a non problem with separate deployment and really hard with scaled deployments.
 - The ability to embed the team name in the deployment name. This seems like a stupid reason but make debugging SOOO much easier, with just using `kubectl`.
+
+### How to manage JuiceShop easily using `kubectl`?
+
+You can list all JuiceShops with relevant information using the custom-columns feature of kubectl.
+You'll need to down load the juiceShop.txt from the repository first:
+
+```bash
+kubectl get -l app=juice-shop -o custom-columns-file=juiceShop.txt deployments
+```
 
 ### Did somebody actually ask any of these questions?
 

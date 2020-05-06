@@ -4,11 +4,11 @@ metadata:
   namespace: {{ .Release.Namespace | quote }}
   name: juice-balancer
   labels:
-    helm.sh/chart: {{ include "juicy-ctf.chart" . }}
+    helm.sh/chart: {{ include "multi-juicer.chart" . }}
 rules:
   - apiGroups: ['apps']
     resources: ['deployments']
-    verbs: ['get', 'create', 'list', 'delete']
+    verbs: ['get', 'create', 'list', 'delete', 'patch']
   - apiGroups: [''] # "" indicates the core API group
     resources: ['services']
     verbs: ['get', 'create', 'delete']

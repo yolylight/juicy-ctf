@@ -3,14 +3,22 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"reflect"
+	"sort"
 	"time"
 
-	"github.com/go-redis/redis"
 	"github.com/op/go-logging"
+	"github.com/speps/go-hashids"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 var log = logging.MustGetLogger("ProgressWatchdog")
@@ -19,25 +27,15 @@ var format = logging.MustStringFormatter(
 	`%{time:15:04:05.000} %{shortfunc}: %{level:.4s} %{message}`,
 )
 
-// ChallengesPayload complete payload from the JuiceShop challenge api endpoint
-type ChallengesPayload struct {
-	Status string      `json:"status"`
-	Data   []Challenge `json:"data"`
-}
-
-// Challenge JuiceShop Challenge model
-type Challenge struct {
-	ID          int    `json:"id"`
-	Key         string `json:"key"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Difficulty  int    `json:"difficulty"`
-	Solved      bool   `json:"solved"`
-}
-
-// ContinueCodePayload json format of the get continue code response
+// ContinueCodePayload json format of the get ContinueCode response
 type ContinueCodePayload struct {
 	ContinueCode string `json:"continueCode"`
+}
+
+// ProgressUpdateJobs contains all information required by a ProgressUpdateJobs worker to do its Job
+type ProgressUpdateJobs struct {
+	Teamname         string
+	LastContinueCode string
 }
 
 func main() {
@@ -45,91 +43,128 @@ func main() {
 
 	logFormatter := logging.NewBackendFormatter(logBackend, format)
 	logBackendLeveled := logging.AddModuleLevel(logBackend)
-	logBackendLeveled.SetLevel(logging.ERROR, "")
+	logBackendLeveled.SetLevel(logging.DEBUG, "")
 
 	log.SetBackend(logBackendLeveled)
 	logging.SetBackend(logBackendLeveled, logFormatter)
 
-	redisHost := os.Getenv("REDIS_HOST")
-	redisPort := os.Getenv("REDIS_PORT")
-	redisPassword := os.Getenv("REDIS_PASSWORD")
-	teamname := os.Getenv("TEAMNAME")
-
-	client := redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%s", redisHost, redisPort),
-		Password: redisPassword,
-	})
-
-	pong, err := client.Ping().Result()
-
-	if err == nil {
-		log.Infof("Got Redis Pong Back: %v", pong)
-	} else {
-		log.Error("Could not reach redis")
-		log.Errorf("%v", err)
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
 	}
 
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	progressUpdateJobs := make(chan ProgressUpdateJobs)
+
+	workerCount := 10
+	log.Infof("Starting ProgressWatchdog with %d worker go routines", workerCount)
+
+	// Start 10 workers which fetch and update ContinueCodes based on the `progressUpdateJobs` queue / channel
+	for i := 0; i < workerCount; i++ {
+		go workOnProgressUpdates(progressUpdateJobs, clientset)
+	}
+
+	createProgressUpdateJobs(progressUpdateJobs, clientset)
+}
+
+// Constantly lists all JuiceShops in managed by MultiJuicer and queues progressUpdatesJobs for them
+func createProgressUpdateJobs(progressUpdateJobs chan<- ProgressUpdateJobs, clientset *kubernetes.Clientset) {
 	for {
-		time.Sleep(5 * time.Second)
+		// Get Instances
+		log.Debug("Looking for Instances")
+		opts := metav1.ListOptions{
+			LabelSelector: "app=juice-shop",
+		}
 
-		log.Debug("Fetching cached continue code")
-		lastContinueCode := getCachedContinueCode(client, teamname)
-		log.Debug("Fetching current continue code")
-		currentContinueCode := getCurrentContinueCode()
+		namespace := os.Getenv("NAMESPACE")
+		juiceShops, err := clientset.AppsV1().Deployments(namespace).List(opts)
+		if err != nil {
+			panic(err.Error())
+		}
 
-		if lastContinueCode == nil && currentContinueCode == nil {
-			log.Warning("Failed to fetch both current and cached continue code")
-		} else if lastContinueCode == nil && currentContinueCode != nil {
-			log.Debug("Did not find a cached continue code.")
-			log.Debug("Last continue code was nil. This should only happen once per team.")
-			cacheContinueCode(client, teamname, *currentContinueCode)
-		} else if currentContinueCode == nil {
-			log.Debug("Could not get current continue code. Juice Shop might be down. Sleeping and retrying in 5 sec")
-		} else {
-			log.Debug("Checking Difference between continue code")
-			if *lastContinueCode != *currentContinueCode {
-				log.Debugf("Continue codes differ (last vs curr): (%s vs %s)", *lastContinueCode, *currentContinueCode)
-				log.Debug("Applying cached continue code")
-				applyContinueCode(*lastContinueCode)
-				log.Debug("ReFetching current continue code")
-				currentContinueCode = getCurrentContinueCode()
+		log.Debugf("Found %d JuiceShop running", len(juiceShops.Items))
 
-				log.Debug("Caching current continue code")
-				cacheContinueCode(client, teamname, *currentContinueCode)
-			} else {
-				log.Debug("Continue codes are identical. Sleeping")
+		for _, instance := range juiceShops.Items {
+			teamname := instance.Labels["team"]
+
+			if instance.Status.ReadyReplicas != 1 {
+				continue
 			}
+
+			log.Debugf("Found instance for team %s", teamname)
+
+			progressUpdateJobs <- ProgressUpdateJobs{
+				Teamname:         instance.Labels["team"],
+				LastContinueCode: instance.Annotations["multi-juicer.iteratec.dev/continueCode"],
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func workOnProgressUpdates(progressUpdateJobs <-chan ProgressUpdateJobs, clientset *kubernetes.Clientset) {
+	for job := range progressUpdateJobs {
+		log.Debugf("Running ProgressUpdateJob for team '%s'", job.Teamname)
+		lastContinueCode := job.LastContinueCode
+		log.Debug("Fetching current ContinueCode")
+		currentContinueCode, err := getCurrentContinueCode(job.Teamname)
+
+		if err != nil {
+			log.Warningf("Failed to fetch ContinueCode for team '%s' from Juice Shop", job.Teamname)
+			log.Warning(err)
+			continue
+		}
+
+		log.Debug("Checking Difference between ContinueCode")
+
+		currentSolvedChallenges, _ := ParseContinueCode(currentContinueCode)
+		lastSolvedChallenges, _ := ParseContinueCode(lastContinueCode)
+
+		switch CompareChallengeStates(currentSolvedChallenges, lastSolvedChallenges) {
+		case ApplyCode:
+			log.Debugf("ContinueCodes differ (current vs last): (%s vs %s)", currentContinueCode, lastContinueCode)
+			log.Debug("Applying cached ContinueCode")
+			log.Infof("Last ContinueCode for team '%s' contains unsolved challenges", job.Teamname)
+			applyContinueCode(job.Teamname, lastContinueCode)
+
+			log.Debug("ReFetching current ContinueCode")
+			currentContinueCode, err = getCurrentContinueCode(job.Teamname)
+
+			if err != nil {
+				log.Errorf("Failed to fetch ContinueCode from Juice Shop for team '%s' to reapply it", job.Teamname)
+				log.Error(err)
+				continue
+			}
+
+			log.Debug("Caching current ContinueCode")
+			cacheContinueCode(clientset, job.Teamname, currentContinueCode)
+		case UpdateCache:
+			cacheContinueCode(clientset, job.Teamname, currentContinueCode)
+		case NoOp:
+			log.Debug("No need to apply ContinueCode, Skipping")
 		}
 	}
 }
 
-func getCachedContinueCode(client *redis.Client, teamname string) *string {
-	val, err := client.Get(fmt.Sprintf("t-%s-continue-code", teamname)).Result()
-
-	if err != nil {
-		log.Errorf("Could not get continue code from redis: %v", err)
-		return nil
-	}
-
-	log.Infof("Got 't-%s-continue-code': '%s'", teamname, val)
-
-	return &val
-}
-
-func getCurrentContinueCode() *string {
-	url := "http://localhost:3000/rest/continue-code"
+func getCurrentContinueCode(teamname string) (string, error) {
+	url := fmt.Sprintf("http://t-%s-juiceshop:3000/rest/continue-code", teamname)
 
 	req, err := http.NewRequest("GET", url, bytes.NewBuffer([]byte{}))
 	if err != nil {
 		log.Warning("Failed to create http request")
 		log.Warning(err)
-		return nil
+		panic("Failed to create http request")
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Warning("Failed to fetch continue code from juice shop.")
+		log.Warning("Failed to fetch ContinueCode from juice shop")
 		log.Warning(err)
-		return nil
+		return "", errors.New("Failed to fetch ContinueCode")
 	}
 	defer res.Body.Close()
 
@@ -138,8 +173,8 @@ func getCurrentContinueCode() *string {
 		body, err := ioutil.ReadAll(res.Body)
 
 		if err != nil {
-			log.Error("Failed to read response body stream.")
-			return nil
+			log.Error("Failed to read response body stream")
+			return "", errors.New("Failed to response body stream from Juice Shop")
 		}
 
 		continueCodePayload := ContinueCodePayload{}
@@ -147,85 +182,133 @@ func getCurrentContinueCode() *string {
 		err = json.Unmarshal(body, &continueCodePayload)
 
 		if err != nil {
-			log.Error("Failed to parse json of a challenge status.")
+			log.Error("Failed to parse json of a challenge status")
 			log.Error(err)
-			return nil
+			return "", errors.New("Failed to parse JSON from Juice Shop ContinueCode response")
 		}
 
-		log.Debugf("Got current continue code: '%s'", continueCodePayload.ContinueCode)
+		log.Debugf("Got current ContinueCode: '%s'", continueCodePayload.ContinueCode)
 
-		return &continueCodePayload.ContinueCode
+		return continueCodePayload.ContinueCode, nil
 	default:
-		log.Warningf("Unexpected response status code '%d'", res.StatusCode)
-		return nil
+		return "", fmt.Errorf("Unexpected response status code '%d' from Juice Shop", res.StatusCode)
 	}
 }
 
-func applyContinueCode(continueCode string) {
-	url := fmt.Sprintf("http://localhost:3000/rest/continue-code/apply/%s", continueCode)
+func applyContinueCode(teamname, continueCode string) {
+	url := fmt.Sprintf("http://t-%s-juiceshop:3000/rest/continue-code/apply/%s", teamname, continueCode)
 
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer([]byte{}))
 	if err != nil {
-		log.Warning("Failed to create http request to set the current continue code")
+		log.Warning("Failed to create http request to set the current ContinueCode")
 		log.Warning(err)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Warning("Failed to set the current continue code to juice shop.")
+		log.Warning("Failed to set the current ContinueCode to juice shop")
 		log.Warning(err)
 	}
 	defer res.Body.Close()
 }
 
-func cacheContinueCode(client *redis.Client, teamname string, continueCode string) {
-	log.Infof("Updating 't-%s-continue-code' to '%s'", teamname, continueCode)
-	err := client.Set(fmt.Sprintf("t-%s-continue-code", teamname), continueCode, 0).Err()
+// UpdateProgressDeploymentDiff contains only the parts of the deployment we are interessted in updating
+type UpdateProgressDeploymentDiff struct {
+	Metadata UpdateProgressDeploymentMetadata `json:"metadata"`
+}
+
+// UpdateProgressDeploymentMetadata a shim of the k8s metadata object containing only annotations
+type UpdateProgressDeploymentMetadata struct {
+	Annotations UpdateProgressDeploymentDiffAnnotations `json:"annotations"`
+}
+
+// UpdateProgressDeploymentDiffAnnotations the app specific annotations relevant to the `progress-watchdog`
+type UpdateProgressDeploymentDiffAnnotations struct {
+	ContinueCode     string `json:"multi-juicer.iteratec.dev/continueCode"`
+	ChallengesSolved string `json:"multi-juicer.iteratec.dev/challengesSolved"`
+}
+
+func cacheContinueCode(clientset *kubernetes.Clientset, teamname string, continueCode string) {
+	log.Infof("Updating saved ContinueCode of team '%s'", teamname)
+
+	solvedChallenges, err := ParseContinueCode(continueCode)
 	if err != nil {
-		log.Error("Failed to persist current continue code to redis: %v", err)
+		log.Warningf("Could not decode continueCode '%s'", continueCode)
+	}
+
+	diff := UpdateProgressDeploymentDiff{
+		Metadata: UpdateProgressDeploymentMetadata{
+			Annotations: UpdateProgressDeploymentDiffAnnotations{
+				ContinueCode:     continueCode,
+				ChallengesSolved: fmt.Sprintf("%d", len(solvedChallenges)),
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(diff)
+	if err != nil {
+		panic("Could not encode json, to update ContinueCode and challengeSolved count on deployment")
+	}
+
+	namespace := os.Getenv("NAMESPACE")
+	_, err = clientset.AppsV1().Deployments(namespace).Patch(fmt.Sprintf("t-%s-juiceshop", teamname), types.MergePatchType, jsonBytes)
+	if err != nil {
+		log.Errorf("Failed to patch new ContinueCode into deployment for team %s", teamname)
+		log.Error(err)
 	}
 }
 
-func getChallengeStatus() *ChallengesPayload {
-	url := "http://localhost:3000/api/Challenges/"
-
-	req, err := http.NewRequest("GET", url, bytes.NewBuffer([]byte{}))
-	if err != nil {
-		log.Warning("Failed to create http request")
-		log.Warning(err)
-		return nil
-	}
-	client := http.DefaultClient
-	res, err := client.Do(req)
-	if err != nil {
-		log.Warning("Failed to fetch progress from juice shop.")
-		log.Warning(err)
-		return nil
-	}
-	defer res.Body.Close()
-
-	switch res.StatusCode {
-	case 200:
-		body, err := ioutil.ReadAll(res.Body)
-
-		if err != nil {
-			log.Error("Failed to read response body stream.")
-			return nil
+func contains(s []int, e int) bool {
+	for _, a := range s {
+		if a == e {
+			return true
 		}
-
-		challengesPayload := ChallengesPayload{}
-
-		err = json.Unmarshal(body, &challengesPayload)
-
-		if err != nil {
-			log.Error("Failed to parse json of a challenge status.")
-			log.Error(err)
-			return nil
-		}
-
-		return &challengesPayload
-
-	default:
-		log.Warningf("Unexpected response status code '%d'", res.StatusCode)
-		return nil
 	}
+	return false
+}
+
+// UpdateState defines how two challenge state differ from each other, and indicates which action should be taken
+type UpdateState string
+
+const (
+	// UpdateCache The cache aka the continue code annotation on the deployment should be updated
+	UpdateCache UpdateState = "UpdateCache"
+	// ApplyCode The last continue code should be applied to recover lost challenges
+	ApplyCode UpdateState = "ApplyCode"
+	// NoOp Challenge state is identical, nothing to do 🤷
+	NoOp UpdateState = "NoOp"
+)
+
+// CompareChallengeStates Compares to current vs last challenge state and decides what should happen next
+func CompareChallengeStates(currentSolvedChallenges, lastSolvedChallenges []int) UpdateState {
+	for _, challengeSolvedInLastContinueCode := range lastSolvedChallenges {
+		contained := contains(currentSolvedChallenges, challengeSolvedInLastContinueCode)
+
+		if contained == false {
+			return ApplyCode
+		}
+	}
+
+	sort.Ints(currentSolvedChallenges)
+	sort.Ints(lastSolvedChallenges)
+	if reflect.DeepEqual(currentSolvedChallenges, lastSolvedChallenges) {
+		return NoOp
+	}
+	return UpdateCache
+}
+
+// ParseContinueCode returns the number of challenges solved by this ContinueCode
+func ParseContinueCode(continueCode string) ([]int, error) {
+	hd := hashids.NewData()
+	hd.Salt = "this is my salt"
+	hd.MinLength = 60
+	hd.Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+
+	hashIDClient, _ := hashids.NewWithData(hd)
+	decoded, err := hashIDClient.DecodeWithError(continueCode)
+
+	if err != nil {
+		return make([]int, 0), err
+	}
+
+	return decoded, nil
 }

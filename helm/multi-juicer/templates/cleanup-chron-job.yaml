@@ -5,15 +5,15 @@ metadata:
   name: 'cleanup-job'
 spec:
   schedule: {{ .Values.juiceShopCleanup.cron }}
-  successfulJobsHistoryLimit: 10
-  failedJobsHistoryLimit: 10
+  successfulJobsHistoryLimit: {{ .Values.juiceShopCleanup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.juiceShopCleanup.failedJobsHistoryLimit }}
   jobTemplate:
     spec:
       template:
         metadata:
           labels:
             name: 'cleanup-job'
-            helm.sh/chart: {{ include "juicy-ctf.chart" . }}
+            helm.sh/chart: {{ include "multi-juicer.chart" . }}
         spec:
           serviceAccountName: 'juice-cleaner'
           containers:
@@ -25,15 +25,6 @@ spec:
                   value: {{ .Release.Namespace | quote }}
                 - name: MAX_INACTIVE_DURATION
                   value: {{ .Values.juiceShopCleanup.gracePeriod }}
-                - name: REDIS_HOST
-                  value: '{{ .Release.Name }}-redis-master'
-                - name: REDIS_PORT
-                  value: '6379'
-                - name: REDIS_PASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: '{{ .Release.Name }}-redis'
-                      key: redis-password
           restartPolicy: Never
           {{- with .Values.nodeSelector }}
           nodeSelector:

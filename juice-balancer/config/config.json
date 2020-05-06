@@ -1,14 +1,8 @@
 {
   "port": 3000,
   "namespace": "default",
-  "deploymentContext": "juicy-ctf",
+  "deploymentContext": "multi-juicer",
   "maxJuiceShopInstances": 10,
-  "redis": {
-    "host": "juice-balancer-redis",
-    "password": "myredispassword",
-    "port": 6379,
-    "redis-secret-name": "juicy-ctf-redis"
-  },
   "admin": {
     "username": "admin",
     "password": "12345678"
@@ -18,12 +12,19 @@
     "secret": "askdbakhdajhvdsjavjdsgv",
     "secure": false
   },
+  "metrics": {
+    "enabled": false,
+    "basicAuth": {
+      "username": "prometheus-scraper",
+      "password": "ERzCT4pwBDxfCKRGmfrMa8KQ8sXf8GKy"
+    }
+  },
   "juiceShop": {
     "image": "bkimminich/juice-shop",
     "tag": "snapshot",
     "imagePullPolicy": "IfNotPresent",
     "ctfKey": "zLp@.-6fMW6L-7R3b!9uR_K!NfkkTr",
-    "nodeEnv": "juicy-ctf",
+    "nodeEnv": "multi-juicer",
     "resources:": {
       "requests": {
         "memory": "256Mi",

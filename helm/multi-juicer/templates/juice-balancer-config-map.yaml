@@ -3,7 +3,7 @@ kind: ConfigMap
 metadata:
   name: juice-balancer-config
   labels:
-    helm.sh/chart: {{ include "juicy-ctf.chart" . }}
+    helm.sh/chart: {{ include "multi-juicer.chart" . }}
 data:
   config.json: |
     {
@@ -11,18 +11,18 @@ data:
       "namespace": {{ .Release.Namespace | quote }},
       "deploymentContext": {{ .Release.Name | quote }},
       "maxJuiceShopInstances": {{ .Values.juiceShop.maxInstances}},
-      "redis": {
-        "host": "{{ .Release.Name}}-redis-master",
-        "port": 6379,
-        "redis-secret-name": "{{ .Release.Name}}-ctf-redis"
-      },
       "cookieParser": {
-        "cookieName": {{ include "juicy-ctf.cookieName" . | quote }},
+        "cookieName": {{ include "multi-juicer.cookieName" . | quote }},
         "secure": {{ .Values.balancer.cookie.secure }}
       },
       "admin": {
         "username": "admin"
       },
+  {{- if .Values.balancer.metrics.enabled }}
+      "metrics": {
+        "enabled": true
+      },
+  {{- end }}
       "juiceShop": {
         "image": {{ .Values.juiceShop.image | quote }},
         "tag": {{ .Values.juiceShop.tag | quote }},
